@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/compress.py": {
+      "maxDuration": 30
+    }
+  }
+}
