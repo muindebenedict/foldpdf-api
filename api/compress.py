@@ -1,8 +1,8 @@
 import json
 import io
+import traceback
 from http.server import BaseHTTPRequestHandler
 
-# NOTE: keep imports, but they may fail on Vercel later (we’ll fix that next step)
 try:
     import pikepdf
     from PIL import Image
@@ -87,19 +87,55 @@ class handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
 
-            file_bytes = body
+            # Look for the raw bytes from the form data
+            boundary = self.headers.get('Content-Type', '').split('boundary=')[-1]
+            file_bytes = None
+            mode = 'smart'
+
+            if boundary and b'--' + boundary.encode() in body:
+                parts = body.split(b'--' + boundary.encode())
+                for part in parts:
+                    if b'Content-Disposition' not in part:
+                        continue
+                    if b'name="file"' in part:
+                        content = part.split(b'\r\n\r\n', 1)[-1]
+                        if content.endswith(b'\r\n'):
+                            content = content[:-2]
+                        file_bytes = content
+                    elif b'name="mode"' in part:
+                        content = part.split(b'\r\n\r\n', 1)[-1]
+                        if content.endswith(b'\r\n'):
+                            content = content[:-2]
+                        mode = content.decode().strip()
+            else:
+                file_bytes = body
 
             if not file_bytes:
                 self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Original-Size, X-New-Size, X-Images-Processed')
                 self.end_headers()
-                self.wfile.write(b"No file provided")
+                self.wfile.write(b'{"error": "No file provided"}')
                 return
 
-            result = compress_pdf(file_bytes)
+            result = compress_pdf(file_bytes, mode)
 
             self.send_response(200)
             self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(result["pdf_bytes"])))
+            
+            # --- CORS HEADERS ---
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Original-Size, X-New-Size, X-Images-Processed")
+            self.send_header("Access-Control-Expose-Headers", "X-Original-Size, X-New-Size, X-Images-Processed")
+            
+            # --- STATS HEADERS ---
+            self.send_header("X-Images-Processed", str(result["processed"]))
+            self.send_header("X-Original-Size", str(result["original_size"]))
+            self.send_header("X-New-Size", str(result["new_size"]))
             self.end_headers()
 
             self.wfile.write(result["pdf_bytes"])
@@ -108,8 +144,21 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
-
+            
+            error_details = traceback.format_exc()
             self.wfile.write(json.dumps({
-                "error": str(e)
+                "error": str(e),
+                "details": error_details
             }).encode())
+
+    def do_OPTIONS(self):
+        # Handles the initial browser security handshake
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Original-Size, X-New-Size, X-Images-Processed")
+        self.send_header("Access-Control-Expose-Headers", "X-Original-Size, X-New-Size, X-Images-Processed")
+        self.end_headers()
