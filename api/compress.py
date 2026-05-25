@@ -11,20 +11,23 @@ except ImportError:
     HAS_LIBS = False
 
 
-def compress_pdf_with_settings(pdf_bytes, scale=0.8, quality=40):
+def compress_pdf_with_settings(pdf_bytes, mode="smart"):
     if not HAS_LIBS:
         raise RuntimeError("Missing dependencies: pikepdf / Pillow")
 
-    pdf = pikepdf.open(io.BytesIO(pdf_bytes))
+    quality_map = {
+        "ultra": 25,
+        "smart": 40,
+        "quality": 60
+    }
+    quality = quality_map.get(mode, 40)
 
+    pdf = pikepdf.open(io.BytesIO(pdf_bytes))
     processed = 0
     skipped = 0
 
     for obj in pdf.objects:
-        if not hasattr(obj, "get"):
-            continue
-
-        if obj.get("/Subtype") != "/Image":
+        if not hasattr(obj, "get") or obj.get("/Subtype") != "/Image":
             continue
 
         try:
@@ -35,19 +38,16 @@ def compress_pdf_with_settings(pdf_bytes, scale=0.8, quality=40):
 
             img = Image.open(io.BytesIO(raw))
 
-            # Resize image based on frontend scale setting
+            # Apply clean scale factor adjustments based on preset
+            scale = 0.7 if mode == "ultra" else (0.8 if mode == "smart" else 1.0)
             if scale < 1.0:
-                new_width = int(img.width * scale)
-                new_height = int(img.height * scale)
-                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                img = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
 
             if img.mode != "RGB":
                 img = img.convert("RGB")
 
             buf = io.BytesIO()
-            # Convert quality float (e.g. 0.30) to integer (e.g. 30) for Pillow
-            img.save(buf, format="JPEG", quality=int(quality * 100), optimize=True)
-
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
             new_data = buf.getvalue()
 
             if len(new_data) >= len(raw) * 0.95:
@@ -56,7 +56,6 @@ def compress_pdf_with_settings(pdf_bytes, scale=0.8, quality=40):
 
             obj.write(new_data)
             obj["/Filter"] = pikepdf.Name("/DCTDecode")
-
             processed += 1
 
         except Exception:
@@ -66,13 +65,11 @@ def compress_pdf_with_settings(pdf_bytes, scale=0.8, quality=40):
     out = io.BytesIO()
     pdf.save(out)
     out.seek(0)
-
     result = out.read()
 
     return {
         "pdf_bytes": result,
         "processed": processed,
-        "skipped": skipped,
         "original_size": len(pdf_bytes),
         "new_size": len(result)
     }
@@ -85,8 +82,7 @@ class handler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
 
             file_bytes = None
-            scale = 0.8
-            quality = 0.30
+            mode = 'smart'
 
             content_type = self.headers.get('Content-Type', '')
             if 'boundary=' in content_type:
@@ -101,14 +97,10 @@ class handler(BaseHTTPRequestHandler):
                         if content.endswith(b'\r\n'): content = content[:-2]
                         if content.endswith(b'--'): content = content[:-2]
                         file_bytes = content
-                    elif b'name="scale"' in part:
+                    elif b'name="mode"' in part:
                         content = part.split(b'\r\n\r\n', 1)[-1]
                         if content.endswith(b'\r\n'): content = content[:-2]
-                        scale = float(content.decode().strip())
-                    elif b'name="quality"' in part:
-                        content = part.split(b'\r\n\r\n', 1)[-1]
-                        if content.endswith(b'\r\n'): content = content[:-2]
-                        quality = float(content.decode().strip())
+                        mode = content.decode().strip()
             else:
                 file_bytes = body
 
@@ -120,19 +112,19 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(b'{"error": "No file received"}')
                 return
 
-            result = compress_pdf_with_settings(file_bytes, scale, quality)
+            result = compress_pdf_with_settings(file_bytes, mode)
 
             self.send_response(200)
             self.send_header("Content-Type", "application/pdf")
             self.send_header("Content-Length", str(len(result["pdf_bytes"])))
             
-            # CORS Headers
+            # --- WILDCARD CORS SECURITY OVERRIDE ---
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Original-Size, X-New-Size, X-Images-Processed")
-            self.send_header("Access-Control-Expose-Headers", "X-Original-Size, X-New-Size, X-Images-Processed")
+            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Expose-Headers", "*")
             
-            # Track sizes
+            # Metrics Tracking Headers
             self.send_header("X-Original-Size", str(result["original_size"]))
             self.send_header("X-New-Size", str(result["new_size"]))
             self.end_headers()
@@ -144,12 +136,13 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            self.wfile.write(json.dumps({"error": str(e), "details": traceback.format_exc()}).encode())
 
     def do_OPTIONS(self):
+        # Allow any frame or sandbox handshake check to pass instantly
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Original-Size, X-New-Size, X-Images-Processed")
-        self.send_header("Access-Control-Expose-Headers", "X-Original-Size, X-New-Size, X-Images-Processed")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Expose-Headers", "*")
         self.end_headers()
