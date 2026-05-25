@@ -11,7 +11,7 @@ except ImportError:
     HAS_LIBS = False
 
 app = Flask(__name__)
-CORS(app)  # Allow ALL origins - fixes your fetch error permanently
+CORS(app)
 
 @app.route('/')
 def home():
@@ -20,23 +20,20 @@ def home():
 @app.route('/api/compress', methods=['POST', 'OPTIONS'])
 def compress_pdf():
     if request.method == 'OPTIONS':
-        return '', 200  # Handle CORS preflight
+        return '', 200
     
     if not HAS_LIBS:
         return jsonify({"error": "PDF libraries not installed"}), 500
     
     try:
-        # Get the uploaded file
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
         
         file = request.files['file']
         mode = request.form.get('mode', 'smart')
         
-        # Read PDF bytes
         pdf_bytes = file.read()
         
-        # Quality mapping
         quality_map = {
             "ultra": 25,
             "smart": 40,
@@ -44,32 +41,28 @@ def compress_pdf():
         }
         quality = quality_map.get(mode, 40)
         
-        # Scale mapping
         scale = 0.7 if mode == "ultra" else (0.8 if mode == "smart" else 1.0)
         
-        # Process PDF
         pdf = pikepdf.open(io.BytesIO(pdf_bytes))
         processed = 0
         skipped = 0
         
         for obj in pdf.objects:
-            if not hasattr(obj, "get") or obj.get("/Subtype") != "/Image":
-                continue
-            
             try:
+                if obj.get("/Subtype") != "/Image":
+                    continue
+
                 raw = obj.read_raw_bytes()
                 if not raw:
                     skipped += 1
                     continue
-                
+
                 img = Image.open(io.BytesIO(raw))
-                
-                # Resize if needed
+
                 if scale < 1.0:
                     new_size = (int(img.width * scale), int(img.height * scale))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                # Convert to RGB for JPEG
+
                 if img.mode in ('RGBA', 'P', 'LA'):
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     if img.mode == 'P':
@@ -81,34 +74,32 @@ def compress_pdf():
                         img = img.convert('RGB')
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
-                
-                # Save compressed JPEG
+
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=quality, optimize=True)
                 new_data = buf.getvalue()
-                
-                # Only replace if we actually saved space
+
                 if len(new_data) >= len(raw) * 0.95:
                     skipped += 1
                     continue
-                
+
                 obj.write(new_data)
                 obj["/Filter"] = pikepdf.Name("/DCTDecode")
                 if "/DecodeParms" in obj:
                     del obj["/DecodeParms"]
                 processed += 1
-                
+
+            except (AttributeError, ValueError):
+                continue
             except Exception:
                 skipped += 1
                 continue
         
-        # Save result
         out = io.BytesIO()
         pdf.save(out)
         out.seek(0)
         result_bytes = out.read()
         
-        # Return compressed PDF with headers
         return send_file(
             io.BytesIO(result_bytes),
             mimetype='application/pdf',
