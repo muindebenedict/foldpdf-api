@@ -1,2 +1,10 @@
+[project]
+name = "foldpdf-api"
+version = "1.0.0"
+dependencies = [
+    "pikepdf",
+    "Pillow"
+]
+
 [tool.vercel]
 entrypoint = "api.compress:handler"
