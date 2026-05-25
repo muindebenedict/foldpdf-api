@@ -100,17 +100,16 @@ def compress_pdf():
         out.seek(0)
         result_bytes = out.read()
         
-        return send_file(
+        response = send_file(
             io.BytesIO(result_bytes),
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f'foldpdf-compressed-{mode}.pdf',
-            headers={
-                'X-Original-Size': str(len(pdf_bytes)),
-                'X-New-Size': str(len(result_bytes)),
-                'X-Images-Processed': str(processed)
-            }
+            download_name=f'foldpdf-compressed-{mode}.pdf'
         )
+        response.headers['X-Original-Size'] = str(len(pdf_bytes))
+        response.headers['X-New-Size'] = str(len(result_bytes))
+        response.headers['X-Images-Processed'] = str(processed)
+        return response
         
     except Exception as e:
         return jsonify({
