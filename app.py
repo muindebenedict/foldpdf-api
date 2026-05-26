@@ -42,6 +42,7 @@ def compress_pdf():
         output_path = input_path.replace('.pdf', '_out.pdf')
 
         try:
+            # Base flags for all modes
             cmd = [
                 'gs',
                 '-sDEVICE=pdfwrite',
@@ -53,6 +54,37 @@ def compress_pdf():
                 '-dDetectDuplicateImages=true',
                 '-dCompressFonts=true',
                 '-dSubsetFonts=true',
+            ]
+
+            # Mode-specific extra flags
+            if mode == "ultra":
+                cmd += [
+                    '-dColorImageResolution=72',
+                    '-dGrayImageResolution=72',
+                    '-dMonoImageResolution=72',
+                    '-dColorImageDownsampleType=/Bicubic',
+                    '-dGrayImageDownsampleType=/Bicubic',
+                    '-dDownsampleColorImages=true',
+                    '-dDownsampleGrayImages=true',
+                    '-dDownsampleMonoImages=true',
+                    '-dColorImageFilter=/DCTEncode',
+                    '-dAutoFilterColorImages=false',
+                    '-dJPEGQ=20',
+                ]
+            elif mode == "smart":
+                cmd += [
+                    '-dColorImageResolution=100',
+                    '-dGrayImageResolution=100',
+                    '-dMonoImageResolution=100',
+                    '-dColorImageDownsampleType=/Bicubic',
+                    '-dGrayImageDownsampleType=/Bicubic',
+                    '-dDownsampleColorImages=true',
+                    '-dDownsampleGrayImages=true',
+                    '-dJPEGQ=40',
+                ]
+            # quality mode uses /printer defaults — no extra flags needed
+
+            cmd += [
                 f'-sOutputFile={output_path}',
                 input_path
             ]
