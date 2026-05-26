@@ -2,13 +2,9 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 import io
 import traceback
-
-try:
-    import pikepdf
-    from PIL import Image
-    HAS_LIBS = True
-except ImportError:
-    HAS_LIBS = False
+import subprocess
+import tempfile
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -21,96 +17,81 @@ def home():
 def compress_pdf():
     if request.method == 'OPTIONS':
         return '', 200
-    
-    if not HAS_LIBS:
-        return jsonify({"error": "PDF libraries not installed"}), 500
-    
+
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
-        
+
         file = request.files['file']
         mode = request.form.get('mode', 'smart')
-        
+
         pdf_bytes = file.read()
-        
-        quality_map = {
-            "ultra": 25,
-            "smart": 40,
-            "quality": 60
+        original_size = len(pdf_bytes)
+
+        gs_settings = {
+            "ultra":   "/screen",
+            "smart":   "/ebook",
+            "quality": "/printer"
         }
-        quality = quality_map.get(mode, 40)
-        
-        scale = 0.7 if mode == "ultra" else (0.8 if mode == "smart" else 1.0)
-        
-        pdf = pikepdf.open(io.BytesIO(pdf_bytes))
-        processed = 0
-        skipped = 0
-        
-        for obj in pdf.objects:
-            try:
-                if obj.get("/Subtype") != "/Image":
-                    continue
+        setting = gs_settings.get(mode, "/ebook")
 
-                raw = obj.read_raw_bytes()
-                if not raw:
-                    skipped += 1
-                    continue
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
+            tmp_in.write(pdf_bytes)
+            input_path = tmp_in.name
 
-                img = Image.open(io.BytesIO(raw))
+        output_path = input_path.replace('.pdf', '_out.pdf')
 
-                if scale < 1.0:
-                    new_size = (int(img.width * scale), int(img.height * scale))
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+        try:
+            cmd = [
+                'gs',
+                '-sDEVICE=pdfwrite',
+                '-dCompatibilityLevel=1.4',
+                f'-dPDFSETTINGS={setting}',
+                '-dNOPAUSE',
+                '-dQUIET',
+                '-dBATCH',
+                '-dDetectDuplicateImages=true',
+                '-dCompressFonts=true',
+                '-dSubsetFonts=true',
+                f'-sOutputFile={output_path}',
+                input_path
+            ]
 
-                if img.mode in ('RGBA', 'P', 'LA'):
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'P':
-                        img = img.convert('RGBA')
-                    if img.mode in ('RGBA', 'LA'):
-                        background.paste(img, mask=img.split()[-1])
-                        img = background
-                    else:
-                        img = img.convert('RGB')
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
 
-                buf = io.BytesIO()
-                img.save(buf, format='JPEG', quality=quality, optimize=True)
-                new_data = buf.getvalue()
+            if result.returncode != 0:
+                return jsonify({
+                    "error": "Ghostscript compression failed",
+                    "details": result.stderr.decode()
+                }), 500
 
-                if len(new_data) >= len(raw) * 0.95:
-                    skipped += 1
-                    continue
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
 
-                obj.write(new_data)
-                obj["/Filter"] = pikepdf.Name("/DCTDecode")
-                if "/DecodeParms" in obj:
-                    del obj["/DecodeParms"]
-                processed += 1
+        finally:
+            if os.path.exists(input_path):
+                os.unlink(input_path)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
 
-            except (AttributeError, ValueError):
-                continue
-            except Exception:
-                skipped += 1
-                continue
-        
-        out = io.BytesIO()
-        pdf.save(out)
-        out.seek(0)
-        result_bytes = out.read()
-        
+        # If Ghostscript made it bigger, return original
+        if len(result_bytes) >= original_size:
+            result_bytes = pdf_bytes
+
         response = send_file(
             io.BytesIO(result_bytes),
             mimetype='application/pdf',
             as_attachment=True,
             download_name=f'foldpdf-compressed-{mode}.pdf'
         )
-        response.headers['X-Original-Size'] = str(len(pdf_bytes))
+        response.headers['X-Original-Size'] = str(original_size)
         response.headers['X-New-Size'] = str(len(result_bytes))
-        response.headers['X-Images-Processed'] = str(processed)
+        response.headers['X-Reduction'] = str(round((1 - len(result_bytes) / original_size) * 100, 1))
         return response
-        
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Compression timed out. Try a smaller file."}), 504
+
     except Exception as e:
         return jsonify({
             "error": str(e),
