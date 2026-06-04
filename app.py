@@ -1,134 +1,136 @@
-from flask import Flask, request, send_file, jsonify
-from flask_cors import CORS
 import io
-import traceback
+import os
+import shutil
 import subprocess
 import tempfile
-import os
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/')
-def home():
-    return 'FoldPDF Compression API is running!'
+@app.route("/api/compress", methods=["POST"])
+def compress():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files["file"]
+    level = request.form.get("level", "smart")
+    
+    if not file or file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
 
-@app.route('/api/compress', methods=['POST', 'OPTIONS'])
-def compress_pdf():
-    if request.method == 'OPTIONS':
-        return '', 200
+    temp_dir = tempfile.mkdtemp()
+    input_path = os.path.join(temp_dir, "input.pdf")
+    output_path = os.path.join(temp_dir, "output.pdf")
 
     try:
-        if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+        file.save(input_path)
+        
+        if level == "ultra":
+            quality = 40
+            dpi = 72
+        elif level == "quality":
+            quality = 85
+            dpi = 150
+        else:
+            quality = 65
+            dpi = 100
 
-        file = request.files['file']
-        mode = request.form.get('mode', 'smart')
+        result = subprocess.run([
+            "gs",
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            "-dPDFSETTINGS=/screen",
+            f"-dColorImageResolution={dpi}",
+            f"-dGrayImageResolution={dpi}",
+            f"-dMonoImageResolution={dpi}",
+            "-dNOPAUSE",
+            "-dQUIET",
+            "-dBATCH",
+            f"-sOutputFile={output_path}",
+            input_path
+        ], capture_output=True, timeout=60)
 
-        pdf_bytes = file.read()
-        original_size = len(pdf_bytes)
+        if result.returncode != 0 or not os.path.exists(output_path):
+            return jsonify({"error": "Compression failed"}), 500
 
-        gs_settings = {
-            "ultra":   "/screen",
-            "smart":   "/ebook",
-            "quality": "/printer"
-        }
-        setting = gs_settings.get(mode, "/ebook")
+        original_size = os.path.getsize(input_path)
+        compressed_size = os.path.getsize(output_path)
 
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
-            tmp_in.write(pdf_bytes)
-            input_path = tmp_in.name
+        with open(output_path, "rb") as f:
+            compressed_data = f.read()
 
-        output_path = input_path.replace('.pdf', '_out.pdf')
-
-        try:
-            # Base flags for all modes
-            cmd = [
-                'gs',
-                '-sDEVICE=pdfwrite',
-                '-dCompatibilityLevel=1.4',
-                f'-dPDFSETTINGS={setting}',
-                '-dNOPAUSE',
-                '-dQUIET',
-                '-dBATCH',
-                '-dDetectDuplicateImages=true',
-                '-dCompressFonts=true',
-                '-dSubsetFonts=true',
-            ]
-
-            # Mode-specific extra flags
-            if mode == "ultra":
-                cmd += [
-                    '-dColorImageResolution=72',
-                    '-dGrayImageResolution=72',
-                    '-dMonoImageResolution=72',
-                    '-dColorImageDownsampleType=/Bicubic',
-                    '-dGrayImageDownsampleType=/Bicubic',
-                    '-dDownsampleColorImages=true',
-                    '-dDownsampleGrayImages=true',
-                    '-dDownsampleMonoImages=true',
-                    '-dColorImageFilter=/DCTEncode',
-                    '-dAutoFilterColorImages=false',
-                    '-dJPEGQ=20',
-                ]
-            elif mode == "smart":
-                cmd += [
-                    '-dColorImageResolution=100',
-                    '-dGrayImageResolution=100',
-                    '-dMonoImageResolution=100',
-                    '-dColorImageDownsampleType=/Bicubic',
-                    '-dGrayImageDownsampleType=/Bicubic',
-                    '-dDownsampleColorImages=true',
-                    '-dDownsampleGrayImages=true',
-                    '-dJPEGQ=40',
-                ]
-            # quality mode uses /printer defaults — no extra flags needed
-
-            cmd += [
-                f'-sOutputFile={output_path}',
-                input_path
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
-
-            if result.returncode != 0:
-                return jsonify({
-                    "error": "Ghostscript compression failed",
-                    "details": result.stderr.decode()
-                }), 500
-
-            with open(output_path, 'rb') as f:
-                result_bytes = f.read()
-
-        finally:
-            if os.path.exists(input_path):
-                os.unlink(input_path)
-            if os.path.exists(output_path):
-                os.unlink(output_path)
-
-        # If Ghostscript made it bigger, return original
-        if len(result_bytes) >= original_size:
-            result_bytes = pdf_bytes
+        file_stream = io.BytesIO(compressed_data)
+        file_stream.seek(0)
 
         response = send_file(
-            io.BytesIO(result_bytes),
-            mimetype='application/pdf',
+            file_stream,
+            mimetype="application/pdf",
             as_attachment=True,
-            download_name=f'foldpdf-compressed-{mode}.pdf'
+            download_name="compressed.pdf"
         )
-        response.headers['X-Original-Size'] = str(original_size)
-        response.headers['X-New-Size'] = str(len(result_bytes))
-        response.headers['X-Reduction'] = str(round((1 - len(result_bytes) / original_size) * 100, 1))
+        response.headers["X-Original-Size"] = str(original_size)
+        response.headers["X-Compressed-Size"] = str(compressed_size)
         return response
 
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Compression timed out. Try a smaller file."}), 504
-
+        return jsonify({"error": "Compression timed out"}), 500
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "details": traceback.format_exc()
-        }), 500
+        return jsonify({"error": str(e)}), 500
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+
+@app.route("/api/convert-to-word", methods=["POST"])
+def convert_to_word():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    if not file or file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+
+    temp_dir = tempfile.mkdtemp()
+    input_pdf_path = os.path.join(temp_dir, "input.pdf")
+
+    try:
+        file.save(input_pdf_path)
+
+        result = subprocess.run([
+            "libreoffice", "--headless", "--convert-to", "docx",
+            "--outdir", temp_dir, input_pdf_path
+        ], capture_output=True, text=True, timeout=120)
+
+        if result.returncode != 0:
+            return jsonify({"error": "Conversion failed. Please try again."}), 500
+
+        output_docx_path = os.path.join(temp_dir, "input.docx")
+
+        if not os.path.exists(output_docx_path):
+            return jsonify({"error": "Conversion failed. Please try again."}), 500
+
+        with open(output_docx_path, "rb") as f:
+            docx_data = f.read()
+
+        file_stream = io.BytesIO(docx_data)
+        file_stream.seek(0)
+
+        return send_file(
+            file_stream,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            as_attachment=True,
+            download_name="converted.docx"
+        )
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Conversion timed out. Please try a smaller file."}), 500
+    except Exception as e:
+        return jsonify({"error": "Conversion failed. Please try again."}), 500
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
