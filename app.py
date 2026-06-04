@@ -130,6 +130,10 @@ def convert_to_word():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
