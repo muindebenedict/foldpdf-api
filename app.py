@@ -28,20 +28,20 @@ def compress():
         file.save(input_path)
         
         if level == "ultra":
-            quality = 40
+            pdf_settings = "/screen"
             dpi = 72
         elif level == "quality":
-            quality = 85
+            pdf_settings = "/printer"
             dpi = 150
-        else:
-            quality = 65
+        else:  # smart
+            pdf_settings = "/ebook"
             dpi = 100
 
         result = subprocess.run([
             "gs",
             "-sDEVICE=pdfwrite",
             "-dCompatibilityLevel=1.4",
-            "-dPDFSETTINGS=/screen",
+            f"-dPDFSETTINGS={pdf_settings}",
             f"-dColorImageResolution={dpi}",
             f"-dGrayImageResolution={dpi}",
             f"-dMonoImageResolution={dpi}",
