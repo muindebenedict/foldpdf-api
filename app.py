@@ -15,7 +15,7 @@ def compress():
         return jsonify({"error": "No file uploaded"}), 400
     
     file = request.files["file"]
-    level = request.form.get("level", "smart")
+    level = request.form.get("mode", "smart")
     
     if not file or file.filename == "":
         return jsonify({"error": "No file selected"}), 400
