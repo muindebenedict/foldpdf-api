@@ -98,10 +98,51 @@ def convert_to_word():
     try:
         file.save(input_pdf_path)
 
-        from pdf2docx import Converter
-        cv = Converter(input_pdf_path)
-        cv.convert(output_docx_path, start=0, end=None)
-        cv.close()
+        from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
+        from adobe.pdfservices.operation.pdf_services import PDFServices
+        from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
+        from adobe.pdfservices.operation.io.cloud_asset import CloudAsset
+        from adobe.pdfservices.operation.io.stream_asset import StreamAsset
+        from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
+        from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
+        from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
+        from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
+
+        credentials = ServicePrincipalCredentials(
+            client_id=os.environ.get("ADOBE_CLIENT_ID"),
+            client_secret=os.environ.get("ADOBE_CLIENT_SECRET")
+        )
+
+        pdf_services = PDFServices(credentials=credentials)
+
+        with open(input_pdf_path, "rb") as f:
+            input_stream = f.read()
+
+        input_asset = pdf_services.upload(
+            input_stream=input_stream,
+            mime_type=PDFServicesMediaType.PDF
+        )
+
+        export_params = ExportPDFParams(
+            target_format=ExportPDFTargetFormat.DOCX
+        )
+
+        export_job = ExportPDFJob(
+            input_asset=input_asset,
+            export_pdf_params=export_params
+        )
+
+        location = pdf_services.submit(export_job)
+        pdf_services_response = pdf_services.get_job_result(
+            location,
+            ExportPDFResult
+        )
+
+        result_asset: CloudAsset = pdf_services_response.get_result().get_asset()
+        stream_asset: StreamAsset = pdf_services.get_content(result_asset)
+
+        with open(output_docx_path, "wb") as f:
+            f.write(stream_asset.get_input_stream())
 
         if not os.path.exists(output_docx_path):
             return jsonify({"error": "Conversion failed. Please try again."}), 500
@@ -119,13 +160,10 @@ def convert_to_word():
             download_name="converted.docx"
         )
 
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Conversion timed out. Please try a smaller file."}), 500
     except Exception as e:
         return jsonify({"error": "Conversion failed. Please try again."}), 500
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 @app.route("/api/health", methods=["GET"])
 def health():
