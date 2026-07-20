@@ -3,6 +3,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import json
+import logging
+from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
@@ -301,6 +304,23 @@ def convert_to_pdf():
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
+
+@app.route("/api/fireflies-webhook", methods=["POST"])
+def fireflies_webhook():
+    try:
+        payload = request.get_json(force=True, silent=True)
+
+        logging.info(f"[Fireflies Webhook] Received at {datetime.utcnow()}: {json.dumps(payload)}")
+
+        with open("fireflies_webhook_log.jsonl", "a") as f:
+            f.write(json.dumps({"received_at": str(datetime.utcnow()), "payload": payload}) + "\n")
+
+        return jsonify({"status": "received"}), 200
+
+    except Exception as e:
+        logging.error(f"[Fireflies Webhook] Error: {e}")
+        return jsonify({"status": "error logged"}), 200
 
 
 if __name__ == "__main__":
