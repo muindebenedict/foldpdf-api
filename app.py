@@ -8,11 +8,20 @@ import logging
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
+import requests as ext_requests
+from notion_client import Client as NotionClient
 
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 CORS(app)
+
+FIREFLIES_API_KEY = os.environ.get("FIREFLIES_API_KEY")
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+
+notion = NotionClient(auth=NOTION_API_KEY) if NOTION_API_KEY else None
+
 
 @app.route("/api/compress", methods=["POST"])
 def compress():
@@ -308,15 +317,87 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+def fetch_fireflies_summary(meeting_id):
+    query = """
+    query Transcript($transcriptId: String!) {
+        transcript(id: $transcriptId) {
+            title
+            date
+            summary {
+                overview
+                action_items
+                keywords
+            }
+        }
+    }
+    """
+    response = ext_requests.post(
+        "https://api.fireflies.ai/graphql",
+        headers={
+            "Authorization": f"Bearer {FIREFLIES_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"query": query, "variables": {"transcriptId": meeting_id}},
+        timeout=30
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data.get("data", {}).get("transcript")
+
+
+def push_to_notion(meeting_data):
+    if not meeting_data or not notion:
+        return None
+
+    title = meeting_data.get("title") or "Untitled Meeting"
+    summary = meeting_data.get("summary") or {}
+    overview = summary.get("overview") or "No summary available."
+    action_items = summary.get("action_items") or "None"
+
+    notion.pages.create(
+        parent={"database_id": NOTION_DATABASE_ID},
+        properties={
+            "Name": {"title": [{"text": {"content": title}}]}
+        },
+        children=[
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"text": {"content": "Summary"}}]}
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"text": {"content": overview}}]}
+            },
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"text": {"content": "Action Items"}}]}
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"text": {"content": str(action_items)}}]}
+            }
+        ]
+    )
+
+
 @app.route("/api/fireflies-webhook", methods=["POST"])
 def fireflies_webhook():
     try:
         payload = request.get_json(force=True, silent=True)
-
         logging.info(f"[Fireflies Webhook] Received at {datetime.utcnow()}: {json.dumps(payload)}")
 
-        with open("fireflies_webhook_log.jsonl", "a") as f:
-            f.write(json.dumps({"received_at": str(datetime.utcnow()), "payload": payload}) + "\n")
+        event = payload.get("event")
+        meeting_id = payload.get("meeting_id")
+
+        if event == "Meeting summarized" and meeting_id and meeting_id != "test_00000000":
+            meeting_data = fetch_fireflies_summary(meeting_id)
+            logging.info(f"[Fireflies Webhook] Fetched summary: {json.dumps(meeting_data)}")
+            push_to_notion(meeting_data)
+            logging.info("[Fireflies Webhook] Pushed to Notion successfully")
 
         return jsonify({"status": "received"}), 200
 
