@@ -393,7 +393,7 @@ def fireflies_webhook():
         event = payload.get("event")
         meeting_id = payload.get("meeting_id")
 
-        if event == "Meeting summarized" and meeting_id and meeting_id != "test_00000000":
+        if event == "meeting.summarized" and meeting_id and meeting_id != "test_00000000":
             meeting_data = fetch_fireflies_summary(meeting_id)
             logging.info(f"[Fireflies Webhook] Fetched summary: {json.dumps(meeting_data)}")
             push_to_notion(meeting_data)
