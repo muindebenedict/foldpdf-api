@@ -345,42 +345,101 @@ def fetch_fireflies_summary(meeting_id):
     return data.get("data", {}).get("transcript")
 
 
-def push_to_notion(meeting_data):
+def parse_rich_text(text):
+    parts = text.split("**")
+    rich_text = []
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        rich_text.append({
+            "type": "text",
+            "text": {"content": part},
+            "annotations": {"bold": i % 2 == 1}
+        })
+    if not rich_text:
+        rich_text = [{"type": "text", "text": {"content": text}}]
+    return rich_text
+
+
+def text_to_blocks(text, block_type):
+    blocks = []
+    if not text:
+        return blocks
+    lines = str(text).strip().split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        content = stripped.lstrip("-*•").strip()
+        if not content:
+            continue
+        if block_type == "to_do":
+            blocks.append({
+                "object": "block",
+                "type": "to_do",
+                "to_do": {"rich_text": parse_rich_text(content), "checked": False}
+            })
+        else:
+            blocks.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": parse_rich_text(content)}
+            })
+    return blocks
+
+
+def push_to_notion(meeting_data, meeting_id):
     if not meeting_data or not notion:
         return None
 
     title = meeting_data.get("title") or "Untitled Meeting"
     summary = meeting_data.get("summary") or {}
-    overview = summary.get("overview") or "No summary available."
-    action_items = summary.get("action_items") or "None"
+    overview = summary.get("overview") or ""
+    action_items = summary.get("action_items") or ""
+    raw_date = meeting_data.get("date")
+
+    properties = {
+        "Name": {"title": [{"text": {"content": title}}]},
+        "Meeting ID": {"rich_text": [{"text": {"content": str(meeting_id)}}]}
+    }
+
+    if raw_date:
+        try:
+            if isinstance(raw_date, (int, float)):
+                iso_date = datetime.utcfromtimestamp(raw_date / 1000).isoformat()
+            else:
+                iso_date = str(raw_date)
+            properties["Date"] = {"date": {"start": iso_date}}
+        except Exception:
+            pass
+
+    summary_blocks = text_to_blocks(overview, "bulleted_list_item")
+    if not summary_blocks:
+        summary_blocks = [{
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": "No summary available."}}]}
+        }]
+
+    action_blocks = text_to_blocks(action_items, "to_do")
+    if not action_blocks:
+        action_blocks = [{
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": "None"}}]}
+        }]
+
+    children = (
+        [{"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Summary"}}]}}]
+        + summary_blocks
+        + [{"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Action Items"}}]}}]
+        + action_blocks
+    )
 
     notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
-        properties={
-            "Name": {"title": [{"text": {"content": title}}]}
-        },
-        children=[
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"text": {"content": "Summary"}}]}
-            },
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content": overview}}]}
-            },
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"text": {"content": "Action Items"}}]}
-            },
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content": str(action_items)}}]}
-            }
-        ]
+        properties=properties,
+        children=children
     )
 
 
@@ -396,7 +455,7 @@ def fireflies_webhook():
         if event == "meeting.summarized" and meeting_id and meeting_id != "test_00000000":
             meeting_data = fetch_fireflies_summary(meeting_id)
             logging.info(f"[Fireflies Webhook] Fetched summary: {json.dumps(meeting_data)}")
-            push_to_notion(meeting_data)
+            push_to_notion(meeting_data, meeting_id)
             logging.info("[Fireflies Webhook] Pushed to Notion successfully")
 
         return jsonify({"status": "received"}), 200
