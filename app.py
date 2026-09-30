@@ -31,7 +31,7 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-CORS(app, origins=ALLOWED_ORIGINS, expose_headers=["X-Converted-By", "Retry-After"])
+CORS(app, origins=ALLOWED_ORIGINS, expose_headers=["X-Converted-By", "Retry-After", "X-Original-Size", "X-Compressed-Size", "X-Target-Met"])
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -195,6 +195,65 @@ def run_conversion(media_type, make_job, result_cls, compdf_conversion, mimetype
     return response
 
 
+# Fixed levels (unchanged) and the target-size search, gentlest settings first.
+COMPRESSION_LEVELS = {
+    "ultra": ("/screen", 72),
+    "quality": ("/printer", 150),
+    "smart": ("/ebook", 100),
+}
+# Tried in order from gentlest to strongest when a target size is asked for. 50 DPI is the floor:
+# below it, text in scanned pages stops being readable.
+TARGET_STEPS = [("/printer", 150), ("/ebook", 120), ("/ebook", 100), ("/screen", 85), ("/screen", 72), ("/screen", 60), ("/screen", 50)]
+TARGET_TIME_BUDGET_SECONDS = 90  # stays under gunicorn's 120 s worker timeout
+
+
+def run_ghostscript(input_path, output_path, pdf_settings, dpi):
+    result = subprocess.run([
+        "gs",
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.4",
+        f"-dPDFSETTINGS={pdf_settings}",
+        f"-dColorImageResolution={dpi}",
+        f"-dGrayImageResolution={dpi}",
+        f"-dMonoImageResolution={dpi}",
+        "-dNOPAUSE",
+        "-dQUIET",
+        "-dBATCH",
+        f"-sOutputFile={output_path}",
+        input_path
+    ], capture_output=True, timeout=60)
+    if result.returncode != 0 or not os.path.exists(output_path):
+        raise RuntimeError("Ghostscript failed")
+    return os.path.getsize(output_path)
+
+
+def compress_to_target(input_path, temp_dir, target_bytes):
+    """Binary-search TARGET_STEPS for the gentlest settings that fit. Returns (path, met_target)."""
+    deadline = time.monotonic() + TARGET_TIME_BUDGET_SECONDS
+    sizes = {}
+
+    def attempt(index):
+        if index not in sizes:
+            out = os.path.join(temp_dir, f"try-{index}.pdf")
+            sizes[index] = (run_ghostscript(input_path, out, *TARGET_STEPS[index]), out)
+        return sizes[index]
+
+    low, high, best = 0, len(TARGET_STEPS) - 1, None
+    while low <= high and time.monotonic() < deadline:
+        mid = (low + high) // 2
+        size, path = attempt(mid)
+        if size <= target_bytes:
+            best, high = path, mid - 1
+        else:
+            low = mid + 1
+
+    if best:
+        return best, True
+    # Nothing fitted: hand back the smallest readable result we produced.
+    smallest = min(sizes.values(), key=lambda item: item[0])
+    return smallest[1], False
+
+
 @app.route("/api/compress", methods=["POST"])
 @limiter.limit("30 per hour")
 def compress():
@@ -203,6 +262,15 @@ def compress():
         return error
 
     level = request.form.get("mode", "smart")
+    target_bytes = None
+    if level == "target":
+        try:
+            target_kb = int(request.form.get("target_kb", "100"))
+        except ValueError:
+            return error_response("Choose a target size in KB.", "BAD_REQUEST", 400)
+        if not 20 <= target_kb <= 20480:
+            return error_response("Choose a target size between 20 KB and 20 MB.", "BAD_REQUEST", 400)
+        target_bytes = target_kb * 1024
 
     temp_dir = tempfile.mkdtemp()
     input_path = os.path.join(temp_dir, "input.pdf")
@@ -210,52 +278,31 @@ def compress():
 
     try:
         file.save(input_path)
-
-        if level == "ultra":
-            pdf_settings = "/screen"
-            dpi = 72
-        elif level == "quality":
-            pdf_settings = "/printer"
-            dpi = 150
-        else:
-            pdf_settings = "/ebook"
-            dpi = 100
-
-        result = subprocess.run([
-            "gs",
-            "-sDEVICE=pdfwrite",
-            "-dCompatibilityLevel=1.4",
-            f"-dPDFSETTINGS={pdf_settings}",
-            f"-dColorImageResolution={dpi}",
-            f"-dGrayImageResolution={dpi}",
-            f"-dMonoImageResolution={dpi}",
-            "-dNOPAUSE",
-            "-dQUIET",
-            "-dBATCH",
-            f"-sOutputFile={output_path}",
-            input_path
-        ], capture_output=True, timeout=60)
-
-        if result.returncode != 0 or not os.path.exists(output_path):
-            return error_response("Compression failed", "CONVERSION_FAILED", 500)
-
         original_size = os.path.getsize(input_path)
-        compressed_size = os.path.getsize(output_path)
+        target_met = None
 
+        if target_bytes is not None and original_size <= target_bytes:
+            # Already small enough: return it untouched rather than risk making it bigger.
+            output_path, target_met = input_path, True
+        elif target_bytes is not None:
+            output_path, target_met = compress_to_target(input_path, temp_dir, target_bytes)
+        else:
+            run_ghostscript(input_path, output_path, *COMPRESSION_LEVELS.get(level, COMPRESSION_LEVELS["smart"]))
+
+        compressed_size = os.path.getsize(output_path)
         with open(output_path, "rb") as f:
             compressed_data = f.read()
 
-        file_stream = io.BytesIO(compressed_data)
-        file_stream.seek(0)
-
         response = send_file(
-            file_stream,
+            io.BytesIO(compressed_data),
             mimetype="application/pdf",
             as_attachment=True,
             download_name="compressed.pdf"
         )
         response.headers["X-Original-Size"] = str(original_size)
         response.headers["X-Compressed-Size"] = str(compressed_size)
+        if target_met is not None:
+            response.headers["X-Target-Met"] = "true" if target_met else "false"
         return response
 
     except subprocess.TimeoutExpired:

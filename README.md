@@ -6,7 +6,7 @@ Backend API for [FoldPDF](https://www.foldpdf.online) — a free, privacy-first 
 
 This Flask server handles PDF processing for FoldPDF tools that require server-side processing:
 
-- **Compress PDF** (`/api/compress`) — three compression levels using Ghostscript
+- **Compress PDF** (`/api/compress`) — three compression levels using Ghostscript (`mode=quality|smart|ultra`), or `mode=target` with `target_kb` (20–20480) to get the gentlest compression that fits the size. The response header `X-Target-Met` says whether the target was reached; the search stops at 50 DPI so text stays readable.
 - **PDF to Word** (`/api/convert-to-word`) — high quality conversion using Adobe PDF Services API
 - **PDF to PowerPoint** (`/api/convert-to-ppt`) — conversion using Adobe PDF Services API
 - **Word to PDF** (`/api/convert-word-to-pdf`) — `.docx` and `.doc` using Adobe PDF Services API
